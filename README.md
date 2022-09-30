@@ -1,3 +1,25 @@
+>   base on <https://gist.github.com/district10/c9d3e2a353b3435a5545b80bf7aba746>
+
+## packaging pip wheels
+
+interactive
+
+```
+make test_in_manylinux
+make build_py36_conda
+...
+```
+
+build all wheels
+
+```
+make build_wheels_in_manylinux
+```
+
+all wheels goes to `wheels/` dir.
+
+---
+
 <p align="center">
 <img src="https://raw.githubusercontent.com/isl-org/Open3D/master/docs/_static/open3d_logo_horizontal.png" width="320" />
 </p>
