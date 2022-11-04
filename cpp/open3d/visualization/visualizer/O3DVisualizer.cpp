@@ -302,6 +302,7 @@ struct O3DVisualizer::Impl {
     std::set<std::string> added_groups_;
     std::vector<DrawObject> objects_;
     std::vector<DrawObject> inspection_objects_;
+    std::vector<DrawObject> wireframe_objects_;
     std::shared_ptr<O3DVisualizerSelections> selections_;
     bool polygon_selection_unselects_ = false;
     bool selections_need_update_ = true;
@@ -348,6 +349,7 @@ struct O3DVisualizer::Impl {
         Checkbox *show_axes;
         Checkbox *show_ground;
         Checkbox *basic_mode;
+        Checkbox *wireframe_mode;
         Combobox *ground_plane;
         ColorEdit *bg_color;
         Slider *point_size;
@@ -638,6 +640,9 @@ struct O3DVisualizer::Impl {
         settings.basic_mode = new Checkbox("");
         settings.basic_mode->SetOnChecked(
                 [this](bool enable) { this->EnableBasicMode(enable); });
+        settings.wireframe_mode = new Checkbox("");
+        settings.wireframe_mode->SetOnChecked(
+                [this](bool enable) { this->EnableWireframeMode(enable); });
 
         auto *grid = new VGrid(2, v_spacing);
         settings.scene_panel->AddChild(GiveOwnership(grid));
@@ -652,6 +657,8 @@ struct O3DVisualizer::Impl {
         grid->AddChild(GiveOwnership(settings.lighting));
         grid->AddChild(std::make_shared<Label>("Raw Mode"));
         grid->AddChild(GiveOwnership(settings.basic_mode));
+        grid->AddChild(std::make_shared<Label>("Wireframe"));
+        grid->AddChild(GiveOwnership(settings.wireframe_mode));
 
         // Light list
         settings.light_panel = new CollapsableVert("Lighting", 0, margins);
@@ -877,6 +884,8 @@ struct O3DVisualizer::Impl {
                     std::dynamic_pointer_cast<geometry::AxisAlignedBoundingBox>(
                             geom);
             auto mesh = std::dynamic_pointer_cast<geometry::MeshBase>(geom);
+            auto tmesh =
+                    std::dynamic_pointer_cast<geometry::TriangleMesh>(geom);
             auto voxel_grid =
                     std::dynamic_pointer_cast<geometry::VoxelGrid>(geom);
             auto octree = std::dynamic_pointer_cast<geometry::Octree>(geom);
@@ -907,10 +916,12 @@ struct O3DVisualizer::Impl {
                 has_colors = (aabb->color_ != Eigen::Vector3d{0.0, 0.0, 0.0});
                 no_shadows = true;
             } else if (mesh) {
-                has_normals = !mesh->vertex_normals_.empty();
+                has_normals = !mesh->vertex_normals_.empty() ||
+                              (tmesh && !tmesh->triangle_normals_.empty());
                 has_colors = true;  // always want base_color as white
             } else if (t_mesh) {
-                has_normals = t_mesh->HasVertexNormals();
+                has_normals = t_mesh->HasVertexNormals() ||
+                              t_mesh->HasTriangleNormals();
                 has_colors = true;  // always want base_color as white
             } else if (voxel_grid) {
                 has_normals = false;
@@ -948,8 +959,6 @@ struct O3DVisualizer::Impl {
             }
 
             // Finally assign material properties if geometry is a triangle mesh
-            auto tmesh =
-                    std::dynamic_pointer_cast<geometry::TriangleMesh>(geom);
             if (tmesh && tmesh->materials_.size() > 0) {
                 // Only a single material is supported for TriangleMesh so we
                 // just grab the first one we find. Users should be using
@@ -1250,6 +1259,83 @@ struct O3DVisualizer::Impl {
         }
     }
 
+    void UpdateGeometryForWireframeMode(bool enable) {
+        if (enable) {
+            // Material for wireframe
+            MaterialRecord mat;
+            mat.shader = "unlitLine";
+            mat.line_width = 2.f;
+            mat.base_color = {0.f, 0.3f, 1.f, 1.f};
+            mat.emissive_color = {10000.f, 10000.f, 10000.f, 1.f};
+            // Create line sets for eligible geometry
+            for (auto &o : objects_) {
+                if (o.geometry &&
+                    o.geometry->GetGeometryType() ==
+                            geometry::Geometry::GeometryType::TriangleMesh) {
+                    // Hide original geometry
+                    scene_->GetScene()->ShowGeometry(o.name, false);
+                    auto tmesh =
+                            std::dynamic_pointer_cast<geometry::TriangleMesh>(
+                                    o.geometry);
+                    auto lines =
+                            geometry::LineSet::CreateFromTriangleMesh(*tmesh);
+                    DrawObject draw_obj;
+                    draw_obj.name = o.name + "_wireframe";
+                    draw_obj.geometry = lines;
+                    draw_obj.material = mat;
+                    wireframe_objects_.push_back(draw_obj);
+                    scene_->GetScene()->AddGeometry(draw_obj.name,
+                                                    draw_obj.geometry.get(),
+                                                    draw_obj.material);
+                } else if (o.tgeometry &&
+                           o.tgeometry->GetGeometryType() ==
+                                   t::geometry::Geometry::GeometryType::
+                                           TriangleMesh) {
+                    // Hide original geometry
+                    scene_->GetScene()->ShowGeometry(o.name, false);
+                    auto tmesh = std::dynamic_pointer_cast<
+                            t::geometry::TriangleMesh>(o.tgeometry);
+                    auto tmesh_legacy = tmesh->ToLegacy();
+                    auto lines = geometry::LineSet::CreateFromTriangleMesh(
+                            tmesh_legacy);
+                    DrawObject draw_obj;
+                    draw_obj.name = o.name + "_wireframe";
+                    draw_obj.geometry = lines;
+                    draw_obj.material = mat;
+                    wireframe_objects_.push_back(draw_obj);
+                    scene_->GetScene()->AddGeometry(draw_obj.name,
+                                                    draw_obj.geometry.get(),
+                                                    draw_obj.material);
+                } else if (o.model) {
+                    // Hide original geometry
+                    scene_->GetScene()->ShowGeometry(o.name, false);
+                    for (auto &mi : o.model->meshes_) {
+                        auto lines = geometry::LineSet::CreateFromTriangleMesh(
+                                *mi.mesh);
+                        DrawObject draw_obj;
+                        draw_obj.name = mi.mesh_name + "_wireframe";
+                        draw_obj.geometry = lines;
+                        draw_obj.material = mat;
+                        wireframe_objects_.push_back(draw_obj);
+                        scene_->GetScene()->AddGeometry(draw_obj.name,
+                                                        draw_obj.geometry.get(),
+                                                        draw_obj.material);
+                    }
+                }
+            }
+        } else {
+            // Remove inspection geometries
+            for (auto &o : wireframe_objects_) {
+                scene_->GetScene()->RemoveGeometry(o.name);
+            }
+            wireframe_objects_.clear();
+            // Show original geometries
+            for (auto &o : objects_) {
+                scene_->GetScene()->ShowGeometry(o.name, true);
+            }
+        }
+    }
+
     void Add3DLabel(const Eigen::Vector3f &pos, const char *text) {
         scene_->AddLabel(pos, text);
     }
@@ -1389,6 +1475,7 @@ struct O3DVisualizer::Impl {
         settings.mouse_buttons[SceneWidget::Controls::ROTATE_SUN]->SetEnabled(
                 enable);
         settings.sun_follows_camera->SetEnabled(enable);
+        settings.wireframe_mode->SetEnabled(enable);
     }
 
     void EnableBasicMode(bool enable) {
@@ -1412,6 +1499,8 @@ struct O3DVisualizer::Impl {
                 was_using_sun_follows_cam_ = true;
             }
             // Update geometry for inspection
+            settings.wireframe_mode->SetChecked(false);
+            EnableWireframeMode(false);
             UpdateGeometryForInspectionMode(true);
             EnableInspectionRelatedUI(false);
             // Force screen redraw
@@ -1425,6 +1514,22 @@ struct O3DVisualizer::Impl {
                 settings.sun_follows_camera->SetChecked(false);
                 EnableSunFollowsCamera(false);
             }
+            SetUIState(ui_state_);
+        }
+    }
+
+    void EnableWireframeMode(bool enable) {
+        auto o3dscene = scene_->GetScene();
+        auto view = o3dscene->GetView();
+        auto low_scene = o3dscene->GetScene();
+        UpdateGeometryForWireframeMode(enable);
+        if (enable) {
+            o3dscene->SetBackground({0.1f, 0.1f, 0.1f, 1.0f});
+            low_scene->ShowSkybox(false);
+            view->SetWireframe(true);
+            scene_->ForceRedraw();
+        } else {
+            view->SetWireframe(false);
             SetUIState(ui_state_);
         }
     }
@@ -2301,6 +2406,10 @@ void O3DVisualizer::SetGroundPlane(rendering::Scene::GroundPlane plane) {
 
 void O3DVisualizer::EnableBasicMode(bool enable) {
     impl_->EnableBasicMode(enable);
+}
+
+void O3DVisualizer::EnableWireframeMode(bool enable) {
+    impl_->EnableWireframeMode(enable);
 }
 
 void O3DVisualizer::SetPointSize(int point_size) {
